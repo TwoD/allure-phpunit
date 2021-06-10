@@ -2,15 +2,25 @@
 
 namespace Yandex\Allure\PhpUnit;
 
-use Exception;
+use Behat\Testwork\EventDispatcher\Event\AfterTested;
 use PHPUnit\Framework\AssertionFailedError;
 use PHPUnit\Framework\ExpectationFailedException;
 use PHPUnit\Framework\Test;
 use PHPUnit\Framework\TestCase;
-use PHPUnit\Framework\TestListener;
 use PHPUnit\Framework\TestSuite;
 use PHPUnit\Framework\DataProviderTestSuite;
 use PHPUnit\Framework\Warning;
+use PHPUnit\Runner\AfterIncompleteTestHook;
+use PHPUnit\Runner\AfterLastTestHook;
+use PHPUnit\Runner\AfterRiskyTestHook;
+use PHPUnit\Runner\AfterSkippedTestHook;
+use PHPUnit\Runner\AfterSuccessfulTestHook;
+use PHPUnit\Runner\AfterTestErrorHook;
+use PHPUnit\Runner\AfterTestFailureHook;
+use PHPUnit\Runner\AfterTestHook;
+use PHPUnit\Runner\BeforeFirstTestHook;
+use PHPUnit\Runner\BeforeTestHook;
+use Throwable;
 use Yandex\Allure\Adapter\Allure;
 use Yandex\Allure\Adapter\Annotation;
 use Yandex\Allure\Adapter\Event\TestCaseBrokenEvent;
@@ -23,13 +33,10 @@ use Yandex\Allure\Adapter\Event\TestSuiteFinishedEvent;
 use Yandex\Allure\Adapter\Event\TestSuiteStartedEvent;
 use Yandex\Allure\Adapter\Model;
 
-class AllurePhpUnit implements TestListener
+class AllurePhpUnit implements AfterTestErrorHook, AfterTestFailureHook, AfterIncompleteTestHook, AfterRiskyTestHook, AfterSkippedTestHook, BeforeFirstTestHook, AfterLastTestHook, BeforeTestHook, AfterSuccessfulTestHook, AfterTestHook
 {
 
-    //NOTE: here we implicitly assume that PHPUnit runs in single-threaded mode
     private $uuid;
-    private $suiteName;
-    private $methodName;
 
     /**
      * Annotations that should be ignored by the annotations parser (especially PHPUnit annotations)
@@ -58,8 +65,8 @@ class AllurePhpUnit implements TestListener
             $outputDirectory = 'build' . DIRECTORY_SEPARATOR . 'allure-results';
         }
 
-        $this->prepareOutputDirectory($outputDirectory, $deletePreviousResults);
-        
+        $this->prepareOutputDirectory(getcwd() . DIRECTORY_SEPARATOR . $outputDirectory, $deletePreviousResults);
+
         // Add standard PHPUnit annotations
         Annotation\AnnotationProvider::addIgnoredAnnotations($this->ignoredAnnotations);
         // Add custom ignored annotations
@@ -83,184 +90,55 @@ class AllurePhpUnit implements TestListener
             Model\Provider::setOutputDirectory($outputDirectory);
         }
     }
-    
-    /**
-     * An error occurred.
-     *
-     * @param Test $test
-     * @param Exception $e
-     * @param float $time
-     */
-    public function addError(Test $test, \Throwable $e, float $time): void
-    {
-        $event = new TestCaseBrokenEvent();
-        Allure::lifecycle()->fire($event->withException($e)->withMessage($e->getMessage()));
+
+    public function executeAfterTestError(string $test, string $message, float $time): void {
+      $event = new TestCaseBrokenEvent();
+      Allure::lifecycle()->fire($event->withMessage($test . ' -> ' . $message));
     }
 
-    /**
-     * A warning occurred.
-     *
-     * @param \PHPUnit\Framework\Test $test
-     * @param \PHPUnit\Framework\Warning $e
-     * @param float $time
-     */
-    public function addWarning(Test $test, Warning $e, float $time): void
-    {
-        // TODO: Implement addWarning() method.
+    public function executeAfterTestFailure(string $test, string $message, float $time): void {
+      $event = new TestCaseFailedEvent();
+      Allure::lifecycle()->fire($event->withMessage($test . ' -> ' . $message));
     }
 
-    /**
-     * A failure occurred.
-     *
-     * @param Test $test
-     * @param AssertionFailedError $e
-     * @param float $time
-     */
-    public function addFailure(Test $test, AssertionFailedError $e, float $time): void
-    {
-        $event = new TestCaseFailedEvent();
-
-        $message = $e->getMessage();
-
-        // Append comparison diff for errors of type ExpectationFailedException (and is subclasses)
-        if (($e instanceof ExpectationFailedException
-            || is_subclass_of($e, 'PHPUnit\Framework\ExpectationFailedException'))
-            && $e->getComparisonFailure()
-        ) {
-            $message .= $e->getComparisonFailure()->getDiff();
-        }
-
-        Allure::lifecycle()->fire($event->withException($e)->withMessage($message));
+    public function executeAfterIncompleteTest(string $test, string $message, float $time): void {
+      $event = new TestCasePendingEvent();
+      Allure::lifecycle()->fire($event->withMessage($test . ' -> ' . $message));
     }
 
-    /**
-     * Incomplete test.
-     *
-     * @param Test $test
-     * @param Exception $e
-     * @param float $time
-     */
-    public function addIncompleteTest(Test $test, \Throwable $e, float $time): void
-    {
-        $event = new TestCasePendingEvent();
-        Allure::lifecycle()->fire($event->withException($e));
+    public function executeAfterRiskyTest(string $test, string $message, float $time): void {
+      $this->executeAfterIncompleteTest($test, $message, $time);
     }
 
-    /**
-     * Risky test.
-     *
-     * @param Test $test
-     * @param Exception $e
-     * @param float $time
-     * @since  Method available since Release 4.0.0
-     */
-    public function addRiskyTest(Test $test, \Throwable $e, float $time): void
-    {
-        $this->addIncompleteTest($test, $e, $time);
+    public function executeAfterSkippedTest(string $test, string $message, float $time): void {
+      $event = new TestCaseCanceledEvent();
+      Allure::lifecycle()->fire($event->withMessage($test . ' -> ' . $message));
     }
 
-    /**
-     * Skipped test.
-     *
-     * @param Test $test
-     * @param Exception $e
-     * @param float $time
-     * @since  Method available since Release 3.0.0
-     */
-    public function addSkippedTest(Test $test, \Throwable $e, float $time): void
-    {
-        $shouldCreateStartStopEvents = false;
-        if ($test instanceof TestCase){
-            $methodName = $test->getName();
-            if ($methodName !== $this->methodName){
-                $shouldCreateStartStopEvents = true;
-                $this->startTest($test);
-            }
-        }
-
-        $event = new TestCaseCanceledEvent();
-        Allure::lifecycle()->fire($event->withException($e)->withMessage($e->getMessage()));
-
-        if ($shouldCreateStartStopEvents && $test instanceof TestCase){
-            $this->endTest($test, 0);
-        }
+    public function executeBeforeFirstTest(): void {
+      $event = new TestSuiteStartedEvent('PHPUnit');
+      $this->uuid = $event->getUuid();
+      Allure::lifecycle()->fire($event);
     }
 
-    /**
-     * A test suite started.
-     *
-     * @param TestSuite $suite
-     * @since  Method available since Release 2.2.0
-     */
-    public function startTestSuite(TestSuite $suite): void
-    {
-        if ($suite instanceof DataProviderTestSuite) {
-            return;
-        }
-
-        $suiteName = $suite->getName();
-        $event = new TestSuiteStartedEvent($suiteName);
-        $this->uuid = $event->getUuid();
-        $this->suiteName = $suiteName;
-
-        if (class_exists($suiteName, false)) {
-            $annotationManager = new Annotation\AnnotationManager(
-                Annotation\AnnotationProvider::getClassAnnotations($suiteName)
-            );
-            $annotationManager->updateTestSuiteEvent($event);
-        }
-
-        Allure::lifecycle()->fire($event);
+    public function executeAfterLastTest(): void {
+      $event = new TestSuiteFinishedEvent($this->uuid);
+      Allure::lifecycle()->fire($event);
     }
 
-    /**
-     * A test suite ended.
-     *
-     * @param TestSuite $suite
-     * @since  Method available since Release 2.2.0
-     */
-    public function endTestSuite(TestSuite $suite): void
-    {
-        if ($suite instanceof DataProviderTestSuite) {
-            return;
-        }
-
-        Allure::lifecycle()->fire(new TestSuiteFinishedEvent($this->uuid));
+    public function executeBeforeTest(string $test): void {
+      $event = new TestCaseStartedEvent($this->uuid, $test);
+      Allure::lifecycle()->fire($event);
     }
 
-    /**
-     * A test started.
-     *
-     * @param Test $test
-     */
-    public function startTest(Test $test): void
-    {
-        if ($test instanceof TestCase) {
-            $testName = $test->getName();
-            $methodName = $this->methodName = $test->getName(false);
-
-            $event = new TestCaseStartedEvent($this->uuid, $testName);
-            if (method_exists($test, $methodName)) {
-                $annotationManager = new Annotation\AnnotationManager(
-                    Annotation\AnnotationProvider::getMethodAnnotations(get_class($test), $methodName)
-                );
-                $annotationManager->updateTestCaseEvent($event);
-            }
-            Allure::lifecycle()->fire($event);
-        }
+    public function executeAfterSuccessfulTest(string $test, float $time): void {
+      $event = new TestCaseFinishedEvent();
+      Allure::lifecycle()->fire($event);
     }
 
-    /**
-     * A test ended.
-     *
-     * @param Test $test
-     * @param float $time
-     * @throws \Exception
-     */
-    public function endTest(Test $test, float $time): void
-    {
-        if ($test instanceof TestCase) {
-            Allure::lifecycle()->fire(new TestCaseFinishedEvent());
-        }
+    public function executeAfterTest(string $test, float $time): void {
+      $event = new TestCaseFinishedEvent();
+      Allure::lifecycle()->fire($event);
     }
+
 }
